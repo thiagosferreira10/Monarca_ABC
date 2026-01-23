@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+.venv/
+env/
+
+# Build / Installer
+build/
+dist/
+*.spec
+
+# IDEs
+.vscode/
+.idea/
+
+# Local Data
+*.log
+*.xlsx
+Monarca.sql
+
+# Installation Binaries (Optional: exclude exe from repo if too large, but useful for small releases)
+# Instalacao/MonarcaABC.exe

@@ -1,0 +1,4 @@
+pandas
+firebird-driver
+xlsxwriter
+python-dotenv
