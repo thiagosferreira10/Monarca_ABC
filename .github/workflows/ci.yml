@@ -5,21 +5,21 @@ on:
     branches: [ main, master, develop ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:    # permite rodar manualmente pelo GitHub
+  workflow_dispatch:
 
 jobs:
   # ============================================================
-  # JOB 1: Testes automatizados
+  # JOB 1: Testes automatizados (roda em todo push / PR)
   # ============================================================
   testes:
     name: 🧪 Pytest
-    runs-on: windows-latest   # mesmo SO do cliente!
+    runs-on: windows-latest
 
     steps:
-      - name: 📥 Checkout do código
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🐍 Configurar Python 3.14
+      - name: 🐍 Python 3.14
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -35,19 +35,19 @@ jobs:
         run: python -m pytest --tb=short -v
 
   # ============================================================
-  # JOB 2: Build de produção (só roda se testes passarem)
+  # JOB 2: Build (só na branch main, após testes passarem)
   # ============================================================
   build:
     name: 🏗️ Build de Produção
     runs-on: windows-latest
-    needs: testes           # ← depende do job de testes
+    needs: testes
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
 
     steps:
-      - name: 📥 Checkout do código
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🐍 Configurar Python 3.14
+      - name: 🐍 Python 3.14
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -60,21 +60,73 @@ jobs:
           pip install pyinstaller
 
       - name: 🔨 Compilar Ferramentas.exe
-        run: pyinstaller MonarcaABC.spec --noconfirm
+        run: |
+          # Verifica se o .spec existe (está no git agora)
+          if (Test-Path "MonarcaABC.spec") {
+            pyinstaller MonarcaABC.spec --noconfirm
+            Write-Host "✅ Compilado via MonarcaABC.spec"
+          } else {
+            # Fallback: gera o exe direto sem spec
+            pyinstaller run_exe.py `
+              --name Ferramentas `
+              --onefile `
+              --windowed `
+              --noconfirm
+            Write-Host "✅ Compilado via fallback (sem .spec)"
+          }
 
       - name: 🏗️ Gerar pasta de produção
-        run: python build_producao.py
+        run: |
+          # Cria o config.ini de exemplo para o build (sem credenciais reais)
+          if (-not (Test-Path "Instalacao")) { New-Item -ItemType Directory -Path "Instalacao" }
+          if (-not (Test-Path "Instalacao\config.ini")) {
+            @"
+          [DATABASE]
+          Server = 192.168.1.1
+          Path = C:\SistemaMonarca\SistemaMonarca.fdb
+          Port = 3050
+          User = SYSDBA
+          Password = masterkey
+          "@ | Set-Content "Instalacao\config.ini"
+            Write-Host "ℹ️  config.ini de exemplo criado"
+          }
 
-      - name: 📦 Upload do artefato de produção
+          # .env mínimo para o build
+          if (-not (Test-Path ".env")) {
+            @"
+          DB_HOST=localhost
+          DB_PORT=3050
+          DB_PATH=C:\SistemaMonarca\SistemaMonarca.fdb
+          DB_USER=SYSDBA
+          DB_PASSWORD=masterkey
+          "@ | Set-Content ".env"
+          }
+
+          python build_producao.py
+
+      - name: 📊 Estatísticas do build
+        run: |
+          $files = Get-ChildItem producao/ -Recurse -File
+          $size = ($files | Measure-Object -Property Length -Sum).Sum
+          Write-Host "Arquivos: $($files.Count)"
+          Write-Host "Tamanho: $([math]::Round($size/1MB, 1)) MB"
+          Write-Host "Run: #${{ github.run_number }} | Commit: ${{ github.sha }}"
+
+      - name: 📦 Upload do Artefato
         uses: actions/upload-artifact@v4
         with:
-          name: producao-${{ github.run_number }}
+          name: producao-v${{ github.run_number }}
           path: producao/
           retention-days: 30
 
-      - name: ✅ Resumo do build
+      - name: ✅ Resumo no GitHub
         run: |
-          echo "Build gerado com sucesso!"
-          echo "Run number: ${{ github.run_number }}"
-          Get-ChildItem producao/ -Recurse | Measure-Object -Property Length -Sum |
-            ForEach-Object { echo "Total: $([math]::Round($_.Sum/1MB, 1)) MB" }
+          echo "## 🏗️ Build #${{ github.run_number }} gerado com sucesso!" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "| Item | Valor |" >> $env:GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $env:GITHUB_STEP_SUMMARY
+          echo "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
+          echo "| Artefato | producao-v${{ github.run_number }} |" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "📥 Baixe o artefato na aba **Actions → Summary**" >> $env:GITHUB_STEP_SUMMARY

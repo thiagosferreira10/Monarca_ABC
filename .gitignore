@@ -14,9 +14,6 @@ dist/
 producao/
 producao2/
 
-# PyInstaller spec (contém paths locais)
-*.spec
-
 # IDEs
 .vscode/
 .idea/
