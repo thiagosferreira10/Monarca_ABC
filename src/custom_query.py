@@ -1,57 +1,101 @@
 QUERY_ABC_BY_LEVEL = """
-select
-  p.descricao,
-  p.codigo,
-  /*
-  n1.descricao as nivel1,
-  n2.descricao as nivel2,
-  n3.descricao as nivel3,
-  n4.descricao as nivel4,
-  coalesce((select sum(e.quantidade) from estoque e where e.produto = p.codigo group by e.produto),0) as estoque,
-  coalesce((select sum(pi.quantidade - coalesce(pv.quantidade,0))
-    from pedido_item pi left join pedido d on (d.codigo = pi.pedido) left join pedido_venda pv on (pv.pedido = pi.pedido and pv.venda_produto = pi.produto)
-    where 1=1 and pi.produto = p.codigo and d.situacao not in (3,4,5) and pi.situacao not in (3,4,5)
-    group by pi.produto),0)
-  as reservado,
-  --Pedido de Compra
-  coalesce((select sum(coalesce(pci.quantidade,0) - coalesce(pce.quantidade,0))
-    from pedido_compra_item pci left join pedido_compra pc on (pc.codigo = pci.pedido) left join pedido_compra_entrega pce on (pci.pedido = pce.pedido and pci.produto = pce.produto)
-    where 1=1 and pci.produto = p.codigo and pc.situacao not in (3,4,5) and pc.sugestao = 'N'
-    group by pci.produto),0)
-  as transito,
-  */
-  coalesce((select sum (i.quantidade) from venda_item i 
-            join venda v on v.codigo = i.venda 
-            where i.produto = p.codigo 
-            and v.data >= ? and v.data <= ? -- Date Filter Added
-            group by i.produto),0) +
-  coalesce((select sum(s.quantidade)
-    from assist a left join assist_item i on (i.assistencia = a.codigo) left join assist_item_produto s on (s.item = i.codigo)
-    where 1=1 and s.baixa_estoque = 'S' and s.produto = p.codigo
-    and a.data >= ? and a.data <= ? -- Date Filter Added
-    group by s.produto),0)
-  as venda,
-  coalesce((select sum (i.quantidade * i.valor_unitario) from venda_item i 
-            join venda v on v.codigo = i.venda 
-            where i.produto = p.codigo 
-            and v.data >= ? and v.data <= ? -- Date Filter Added
-            group by i.produto),0) +
-  coalesce((select sum(s.quantidade * s.preco_unitario)
-    from assist a left join assist_item i on (i.assistencia = a.codigo) left join assist_item_produto s on (s.item = i.codigo)
-    where 1=1 and s.baixa_estoque = 'S' and s.produto = p.codigo
-    and a.data >= ? and a.data <= ? -- Date Filter Added
-    group by s.produto),0)
-  as valor
-from
-  produtos p
-  --left join produtos_nivel1 n1 on (n1.codigo = p.classificacao_n1)
-  --left join produtos_nivel2 n2 on (n2.codigo = p.classificacao_n2)
-  --left join produtos_nivel3 n3 on (n3.codigo = p.classificacao_n3)
-  --left join produtos_nivel4 n4 on (n4.codigo = p.classificacao_n4)
-where
-  1=1
-  and p.ativo = 'S'
-  and p.classificacao_n1 = ? -- Level Parameter
-  --and p.codigo = 762
-order by 3 desc
+WITH VENDAS AS (
+    SELECT 
+        i.produto, 
+        SUM(i.quantidade) as qtd, 
+        SUM(i.quantidade * i.valor_unitario) as valor
+    FROM venda_item i 
+    JOIN venda v ON v.codigo = i.venda 
+    WHERE v.data >= ? AND v.data <= ?
+    GROUP BY i.produto
+),
+ASSIST AS (
+    SELECT 
+        s.produto, 
+        SUM(s.quantidade) as qtd, 
+        SUM(s.quantidade * s.preco_unitario) as valor
+    FROM assist_item_produto s
+    JOIN assist_item i ON i.codigo = s.item
+    JOIN assist a ON a.codigo = i.assistencia
+    WHERE s.baixa_estoque = 'S' 
+    AND a.data >= ? AND a.data <= ?
+    GROUP BY s.produto
+),
+FORNECEDORES AS (
+    SELECT 
+        pf.PRODUTO, 
+        MAX(c.NOME) as NOM_FORNECEDOR
+    FROM PRODUTOS_FORNECEDOR pf
+    JOIN CLIENTES c ON c.CODIGO = pf.FORNECEDOR
+    WHERE pf.PRINCIPAL = 'S'
+    GROUP BY pf.PRODUTO
+)
+SELECT
+    p.descricao,
+    p.codigo,
+    COALESCE(v.qtd, 0) + COALESCE(a.qtd, 0) as venda,
+    COALESCE(v.valor, 0) + COALESCE(a.valor, 0) as valor,
+    f.NOM_FORNECEDOR
+FROM produtos p
+LEFT JOIN VENDAS v ON v.produto = p.codigo
+LEFT JOIN ASSIST a ON a.produto = p.codigo
+LEFT JOIN FORNECEDORES f ON f.produto = p.codigo
+LEFT JOIN PRODUTOS_NIVEL2 n2 ON n2.codigo = p.classificacao_n2
+WHERE
+    p.ativo = 'S'
+    AND p.classificacao_n1 = ?
+    AND (n2.abc = 'S' OR n2.codigo IS NULL)
+ORDER BY 3 DESC
+"""
+
+QUERY_ABC_BY_LEVEL_ORDER = """
+WITH PEDIDOS AS (
+    SELECT 
+        i.produto, 
+        SUM(i.quantidade) as qtd, 
+        SUM(i.quantidade * i.valor_unitario) as valor
+    FROM pedido_item i 
+    JOIN pedido p ON p.codigo = i.pedido 
+    WHERE p.data >= ? AND p.data <= ?
+      AND p.situacao NOT IN (3)
+      AND i.situacao NOT IN (3)
+    GROUP BY i.produto
+),
+ASSIST AS (
+    SELECT 
+        s.produto, 
+        SUM(s.quantidade) as qtd, 
+        SUM(s.quantidade * s.preco_unitario) as valor
+    FROM assist_item_produto s
+    JOIN assist_item i ON i.codigo = s.item
+    JOIN assist a ON a.codigo = i.assistencia
+    WHERE s.baixa_estoque = 'S' 
+    AND a.data >= ? AND a.data <= ?
+    GROUP BY s.produto
+),
+FORNECEDORES AS (
+    SELECT 
+        pf.PRODUTO, 
+        MAX(c.NOME) as NOM_FORNECEDOR
+    FROM PRODUTOS_FORNECEDOR pf
+    JOIN CLIENTES c ON c.CODIGO = pf.FORNECEDOR
+    WHERE pf.PRINCIPAL = 'S'
+    GROUP BY pf.PRODUTO
+)
+SELECT
+    p.descricao,
+    p.codigo,
+    COALESCE(v.qtd, 0) + COALESCE(a.qtd, 0) as venda,
+    COALESCE(v.valor, 0) + COALESCE(a.valor, 0) as valor,
+    f.NOM_FORNECEDOR
+FROM produtos p
+LEFT JOIN PEDIDOS v ON v.produto = p.codigo
+LEFT JOIN ASSIST a ON a.produto = p.codigo
+LEFT JOIN FORNECEDORES f ON f.produto = p.codigo
+LEFT JOIN PRODUTOS_NIVEL2 n2 ON n2.codigo = p.classificacao_n2
+WHERE
+    p.ativo = 'S'
+    AND p.classificacao_n1 = ?
+    AND (n2.abc = 'S' OR n2.codigo IS NULL)
+ORDER BY 3 DESC
 """

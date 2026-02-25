@@ -1,4 +1,13 @@
 QUERY_PURCHASE_SUGGESTION = """
+WITH FORNECEDORES AS (
+    SELECT 
+        pf.PRODUTO, 
+        MAX(c.NOME) as NOM_FORNECEDOR
+    FROM PRODUTOS_FORNECEDOR pf
+    JOIN CLIENTES c ON c.CODIGO = pf.FORNECEDOR
+    WHERE pf.PRINCIPAL = 'S'
+    GROUP BY pf.PRODUTO
+)
 select
   p.descricao,
   p.codigo,
@@ -7,7 +16,7 @@ select
   coalesce((select sum(e.quantidade) from estoque e where e.produto = p.codigo group by e.produto),0) as estoque,
   coalesce((select sum(pi.quantidade - coalesce(pv.quantidade,0))
     from pedido_item pi left join pedido d on (d.codigo = pi.pedido) left join pedido_venda pv on (pv.pedido = pi.pedido and pv.venda_produto = pi.produto)
-    where 1=1 and pi.produto = p.codigo and d.situacao not in (3,4,5) and pi.situacao not in (3,4,5)
+    where 1=1 and pi.produto = p.codigo and d.situacao not in (3, 5) and pi.situacao not in (3, 5)
     group by pi.produto),0)
   as reservado,
   --Pedido de Compra
@@ -24,7 +33,10 @@ select
   n2.descricao as nivel2,
   n3.descricao as nivel3,
   n4.descricao as nivel4,
-  p.abc as abc_id
+  p.abc as abc_id,
+  p.percentual,
+  f.NOM_FORNECEDOR,
+  coalesce(pc.VALOR, 0) as compra_val
 from
   produtos p
   left join abc on (abc.codigo = p.abc)
@@ -32,9 +44,12 @@ from
   left join produtos_nivel2 n2 on (n2.codigo = p.classificacao_n2)
   left join produtos_nivel3 n3 on (n3.codigo = p.classificacao_n3)
   left join produtos_nivel4 n4 on (n4.codigo = p.classificacao_n4)
+  left join FORNECEDORES f on (f.produto = p.codigo)
+  left join PRODUTOS_CUSTO pc on (pc.produto = p.codigo and pc.tipo = 3)
 where
   1=1
   and p.ativo = 'S'
   and p.classificacao_n1 = ?
-order by p.descricao
+  and (n2.abc = 'S' OR n2.codigo IS NULL)
+order by p.abc, p.media desc
 """

@@ -1,4 +1,150 @@
 import pandas as pd
+from datetime import datetime, date
+
+IN_CLAUSE_BATCH_SIZE = 500
+
+def execute_chunked_in_query(cursor, query_template, ids, extra_params=None):
+    """
+    Executes a query with an IN clause, splitting into batches to avoid
+    Firebird's 1500 parameter limit.
+    query_template: SQL string with a single {} placeholder for the IN list.
+    ids: list of values to go into the IN clause.
+    extra_params: additional params to append AFTER the IN params in each batch.
+    Returns: combined list of all fetched rows.
+    """
+    if not ids:
+        return []
+    
+    if extra_params is None:
+        extra_params = []
+    
+    all_rows = []
+    for i in range(0, len(ids), IN_CLAUSE_BATCH_SIZE):
+        chunk = ids[i:i + IN_CLAUSE_BATCH_SIZE]
+        placeholders = ','.join(['?'] * len(chunk))
+        query = query_template.format(placeholders)
+        params = list(chunk) + list(extra_params)
+        cursor.execute(query, params)
+        all_rows.extend(cursor.fetchall())
+    
+    return all_rows
+
+def get_last_4_quarters(reference_date=None):
+    """
+    Returns labels and date ranges for the last 4 closed quarters.
+    Example: If reference_date is Feb 2026, returns Q1-Q4 of 2025.
+    """
+    if reference_date is None:
+        reference_date = date.today()
+    
+    # Determine current quarter
+    current_month = reference_date.month
+    current_year = reference_date.year
+    current_quarter = (current_month - 1) // 3 + 1
+    
+    quarters = []
+    # Start from the quarter before current
+    q = current_quarter - 1
+    y = current_year
+    
+    if q <= 0:
+        q = 4
+        y -= 1
+    
+    # Collect 4 quarters going backwards
+    for _ in range(4):
+        label = f"{y}-{q}"
+        # Month ranges: Q1=1-3, Q2=4-6, Q3=7-9, Q4=10-12
+        start_month = (q - 1) * 3 + 1
+        end_month = q * 3
+        start_date = date(y, start_month, 1)
+        # End date is last day of end_month
+        if end_month == 12:
+            end_date = date(y, 12, 31)
+        else:
+            end_date = date(y, end_month + 1, 1).replace(day=1)
+            end_date = end_date.replace(day=1) - pd.Timedelta(days=1)
+            end_date = end_date.date() if hasattr(end_date, 'date') else end_date
+        
+        quarters.append((label, start_date, date(y, end_month, 28)))  # Simplified end
+        
+        q -= 1
+        if q <= 0:
+            q = 4
+            y -= 1
+    
+    # Reverse to chronological order
+    quarters.reverse()
+    return quarters
+
+def get_quarterly_data(cursor, product_ids, n1_id):
+    """
+    Fetches quarterly averages for a list of products.
+    Returns dict: {product_id: {quarter_label: avg_qty}}
+    """
+    from src.database import get_connection
+    
+    if not product_ids:
+        return {}
+    
+    # Determine schema type for this N1
+    cursor.execute("SELECT TIPO_PROCESSAMENTO FROM PRODUTOS_NIVEL1 WHERE CODIGO = ?", (n1_id,))
+    row = cursor.fetchone()
+    schema_type = row[0] if row and row[0] else 'V'
+    
+    quarters = get_last_4_quarters()
+    result = {pid: {} for pid in product_ids}
+    
+    for label, start_date, end_date in quarters:
+        # Adjust end_date to be inclusive of the full month
+        q_num = int(label.split('-')[1])
+        q_year = int(label.split('-')[0])
+        end_month = q_num * 3
+        
+        # Get last day of end_month
+        import calendar
+        last_day = calendar.monthrange(q_year, end_month)[1]
+        end_date_str = f"{q_year}-{end_month:02d}-{last_day:02d}"
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        
+        # Query based on schema type
+        if schema_type == 'P':
+            query_template = """
+                SELECT pi.PRODUTO, SUM(pi.QUANTIDADE)
+                FROM PEDIDO_ITEM pi
+                JOIN PEDIDO p ON p.CODIGO = pi.PEDIDO
+                WHERE pi.PRODUTO IN ({}) 
+                  AND p.DATA >= ? AND p.DATA <= ?
+                  AND p.SITUACAO NOT IN (3)
+                  AND pi.SITUACAO NOT IN (3)
+                GROUP BY pi.PRODUTO
+            """
+        else:
+            query_template = """
+                SELECT vi.PRODUTO, SUM(vi.QUANTIDADE)
+                FROM VENDA_ITEM vi
+                JOIN VENDA v ON v.CODIGO = vi.VENDA
+                WHERE vi.PRODUTO IN ({})
+                  AND v.DATA >= ? AND v.DATA <= ?
+                GROUP BY vi.PRODUTO
+            """
+        
+        rows = execute_chunked_in_query(
+            cursor, query_template, product_ids,
+            extra_params=[start_date_str, end_date_str]
+        )
+        
+        for prod_id, total_qty in rows:
+            avg = round(float(total_qty) / 3, 1) if total_qty else 0
+            result[prod_id][label] = avg
+        
+        # Fill zeros for products not in result
+        for pid in product_ids:
+            if label not in result[pid]:
+                result[pid][label] = 0
+    
+    return result, [q[0] for q in quarters]
+
 
 def save_suggestion(conn, n1, n2, n3, n4, abc_id, min_months, max_months, rule_id=None):
     """

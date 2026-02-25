@@ -1,4 +1,5 @@
 import pandas as pd
+import math
 from .purchase_query import QUERY_PURCHASE_SUGGESTION
 from .suggestion_logic import get_suggestions
 
@@ -28,12 +29,21 @@ def calculate_purchases(conn, n1_id, n2_id=None, n3_id=None, n4_id=None, abc_ids
         # r[15] is abc_id
         if abc_ids_filter and r[15] not in abc_ids_filter: continue
         
+        media_val = float(r[3]) if r[3] is not None else 0.0
+        # Use stored percentual from DB or 0.0 if null
+        pct_share = float(r[16]) if len(r) > 16 and r[16] is not None else 0.0
+        nom_fornecedor = r[17] if len(r) > 17 else None
+        compra_val = float(r[18]) if len(r) > 18 and r[18] is not None else 0.0
+        
         products.append({
             'DESCRICAO': r[0],
             'CODIGO': r[1],
+            'FORNECEDOR': nom_fornecedor,
+            'COMPRA': compra_val,
             # ...
             'CURVA': r[2],
-            'MEDIA': float(r[3]) if r[3] is not None else 0.0,
+            'PERCENTUAL': pct_share,
+            'MEDIA': media_val,
             'ESTOQUE': float(r[4]) if r[4] is not None else 0.0,
             'RESERVADO': float(r[5]) if r[5] is not None else 0.0,
             'TRANSITO': float(r[6]) if r[6] is not None else 0.0,
@@ -41,6 +51,10 @@ def calculate_purchases(conn, n1_id, n2_id=None, n3_id=None, n4_id=None, abc_ids
             'N2_ID': r[8],
             'N3_ID': r[9],
             'N4_ID': r[10],
+            'N1_DESC': r[11],
+            'N2_DESC': r[12],
+            'N3_DESC': r[13],
+            'N4_DESC': r[14],
             'ABC_ID': r[15]
         })
         
@@ -82,19 +96,21 @@ def calculate_purchases(conn, n1_id, n2_id=None, n3_id=None, n4_id=None, abc_ids
     
     results = []
     
-    for _, prod in df_prod.iterrows():
+    results = []
+    
+    # Iterate with index for Ranking (1-based)
+    for i, (_, prod) in enumerate(df_prod.iterrows(), start=1):
         # Find Strategy
         matched_rule = None
         
         # Filter rules by ABC first
         rules_abc = df_rules[df_rules['ABC'] == prod['ABC_ID']]
+        # ... existing matching logic ...
         
         if rules_abc.empty:
-            # Fallback or Skip? 
-            # If no rule for this ABC class, maybe no suggestion.
             matched_rule = None
         else:
-            # Try to find N4 match
+             # Try to find N4 match
             r4 = rules_abc[
                 (rules_abc['NIVEL1'] == prod['N1_ID']) &
                 (rules_abc['NIVEL2'] == prod['N2_ID']) &
@@ -104,21 +120,7 @@ def calculate_purchases(conn, n1_id, n2_id=None, n3_id=None, n4_id=None, abc_ids
             if not r4.empty:
                 matched_rule = r4.iloc[0]
             else:
-                # N3 Match (N4 is None in Rule OR we ignore N4 column in rule if we want strict hierarchy?)
-                # User requirement: "Localizar na tabela Sugestao_Nivel de acordo com o produto"
-                # Implies specific levels. usually rules are defined like:
-                # Rule A: N1=1, N2=Null... (Generic for N1)
-                # Rule B: N1=1, N2=5... (Specific for N2)
-                # So we look for Exact Matches of existing levels.
-                # But a rule might have Nulls for lower levels.
-                
-                # Try N3 (Rule has N1, N2, N3 matches, N4 is Null/0)
-                # Assuming 0 or None for unused levels in DB? 
-                # Our Create Table/Insert logic likely puts None or Integer.
-                # Let's assume matching None/0/NaN is the way for "Any".
-                # BUT user said "select between 4 levels... ".
-                # Let's stick to explicit match attempts.
-                
+                # N3 Match (N4 is None)
                 r3 = rules_abc[
                     (rules_abc['NIVEL1'] == prod['N1_ID']) &
                     (rules_abc['NIVEL2'] == prod['N2_ID']) &
@@ -128,6 +130,7 @@ def calculate_purchases(conn, n1_id, n2_id=None, n3_id=None, n4_id=None, abc_ids
                 if not r3.empty:
                     matched_rule = r3.iloc[0]
                 else:
+                    # N2 Match
                     r2 = rules_abc[
                         (rules_abc['NIVEL1'] == prod['N1_ID']) &
                         (rules_abc['NIVEL2'] == prod['N2_ID']) &
@@ -137,6 +140,7 @@ def calculate_purchases(conn, n1_id, n2_id=None, n3_id=None, n4_id=None, abc_ids
                     if not r2.empty:
                         matched_rule = r2.iloc[0]
                     else:
+                        # N1 Match
                         r1 = rules_abc[
                             (rules_abc['NIVEL1'] == prod['N1_ID']) &
                             ((rules_abc['NIVEL2'].isnull()) | (rules_abc['NIVEL2'] == 0)) &
@@ -145,50 +149,78 @@ def calculate_purchases(conn, n1_id, n2_id=None, n3_id=None, n4_id=None, abc_ids
                         ]
                         if not r1.empty:
                             matched_rule = r1.iloc[0]
-                            
+
         # Calculations
-        # Duracao = Estoque / Media (Int)
         media = prod['MEDIA']
         estoque = prod['ESTOQUE']
         reservado = prod['RESERVADO']
         transito = prod['TRANSITO']
         
         if media > 0:
-            duracao = int(estoque / media)
+            # Corrected Formula: (Stock - Reserved + Transit) / Media
+            net_stock_duracao = estoque - reservado + transito
+            duracao = round(net_stock_duracao / media, 1)
         else:
-            duracao = 999 # Infinite duration logic? Or 0? 
-            # If media is 0, duration is infinite technically. 
+            duracao = 999 
             
         min_meses = 0
         max_meses = 0
         sugestao = 0
         
         if matched_rule is not None:
-            min_meses = matched_rule['MINIMO']
-            max_meses = matched_rule['MAXIMO']
+            min_meses = int(matched_rule['MINIMO'])
+            max_meses = int(matched_rule['MAXIMO'])
             
-            # Sugestao = (Media * Max) - (Estoque - Reservado + Transito)
-            # Logic Check: (Estoque - Reservado + Transito) represents "Net Available Stock"
             net_stock = estoque - reservado + transito
+            
+            # Target Stock = Max months of coverage
             target_stock = media * max_meses
             
-            sugestao = int(target_stock - net_stock)
-            if sugestao < 0: sugestao = 0
+            if net_stock < target_stock:
+                # Calculate suggestion to top up to Max coverage
+                raw_sug = target_stock - net_stock
+                # Custom rounding: >= 0.3 decimal rounds up, < 0.3 rounds down
+                sugestao = math.ceil(raw_sug) if (raw_sug % 1) >= 0.3 else math.floor(raw_sug)
+                if sugestao < 0: sugestao = 0
+            else:
+                # Stock covers Max months, no purchase needed
+                sugestao = 0
+        
+        # Alert levels based on duration vs min/max thresholds
+        # Orange: critical - duration below minimum
+        # Yellow: warning - duration below maximum but above minimum
+        if sugestao > 0 and duracao < min_meses and min_meses > 0:
+            alert_level = 'orange'
+        elif sugestao > 0 and duracao < max_meses and max_meses > 0:
+            alert_level = 'yellow'
+        else:
+            alert_level = None
         
         results.append({
+            'RK': i,
             'Código': prod['CODIGO'],
+            'Fornecedor': prod['FORNECEDOR'],
             'Produto': prod['DESCRICAO'],
-            'Nível 1': prod['N1_ID'], # Or desc
+            'Nível 1': prod['N1_ID'],
             'Curva': prod['CURVA'],
+            'Percentual': prod['PERCENTUAL'],
             'Média': media,
             'Estoque': estoque,
             'Reservado': reservado,
             'Trânsito': transito,
-            'Duração (Meses)': duracao,
+            'Duração': duracao,
             'Mínimo': min_meses,
             'Máximo': max_meses,
             'Sugestão': sugestao,
-            'Alert': duracao < min_meses and min_meses > 0 # Flag for UI highlighting
+            'Compra R$': prod['COMPRA'],
+            'Cotação': None,
+            'Variação': None,
+            'Total': None,
+            'N1_DESC': prod['N1_DESC'],
+            'N2_DESC': prod['N2_DESC'],
+            'N3_DESC': prod['N3_DESC'],
+            'N4_DESC': prod['N4_DESC'],
+            'Alert': alert_level
         })
         
     return pd.DataFrame(results)

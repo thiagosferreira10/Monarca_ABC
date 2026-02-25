@@ -1,0 +1,9 @@
+[theme]
+base="light"
+primaryColor="#000080" # Navy Blue
+backgroundColor="#FFFFFF"
+secondaryBackgroundColor="#000000" # Sidebar Black
+textColor="#000000" # Main text
+
+[browser]
+gatherUsageStats = false
